@@ -1,0 +1,1139 @@
+---
+title: "Classification - Airline satisfaction analysis"
+author: "Ahmet Zamanis"
+output: 
+  github_document:
+     toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+
+library(rmarkdown)
+library(tidyverse)
+library(ggplot2) 
+library(gt)
+library(patchwork)
+library(RColorBrewer) 
+library(ggthemes) 
+library(hrbrthemes) 
+library(extrafont) 
+library(car)
+library(GGally)
+library(correlation)
+library(olsrr)
+library(corrplot)
+library(rstatix)
+library(Hmisc)
+library(AICcmodavg)
+library(broom)
+library(partykit) 
+library(rpart) 
+library(rpart.plot) 
+library(caret)
+library(randomForest)
+library(scales)
+
+options(scipen=999)
+```
+
+## Purpose
+
+Classification models aim to divide observations into pre-defined categories, using supervised learning algorithms. This analysis aims to handle a typical binary classification problem: Classifying airline passengers as satisfied or not satisfied with the service, using a large dataset of mostly factor predictors.
+
+## Data Preparation
+
+The Airline Passenger Satisfaction dataset was [sourced from Kaggle](https://www.kaggle.com/datasets/teejmahal20/airline-passenger-satisfaction), shared by user [TJ Klein](https://www.kaggle.com/teejmahal20).
+\
+\
+The dataset is pre-split into a training and testing dataset. We will carry out our analysis and modeling on the training dataset, and test our models' accuracy on the testing dataset. We load the training dataset, which includes 103,904 observations and 23 variables.
+\
+```{r}
+df <- read.csv("train_org.csv", header=TRUE, dec=".", encoding="UTF-8" )
+df_k1 <- df[1:5,5:9]
+knitr::kable(df_k1,
+caption = "Original training data")
+```
+\
+The dataset includes 23 columns, excluding the ID columns.
+
+- Customer satisfaction is going to be our binary outcome variable (satisfied or not satisfied/neutral).
+- Numeric variables are age, flight distance, arrival delay and departure delay in minutes.
+- Nominal (unordered) factor variables are gender, customer loyalty (loyal or disloyal), type of travel (personal or business) and class (business, eco, ecoplus).
+- Ordered factor variables are the 1-5 satisfaction ratings for various aspects of service, such as:
+  - Wifi service,
+  - Convenience of departure and arrival time,
+  - Ease of online booking,
+  - Gate location,
+  - Food and drink,
+  - and 9 more ratings.
+  
+We will rename the columns, and the values for factor variables, into shorter yet still intuitive strings. We will also ensure each variable is converted into the proper class, numeric or factor, and ensure the rating columns are leveled from 1 to 5. We will also remove the "n" and ID columns.
+\
+```{r}
+names(df)[3] <- "gender"
+df$gender[df$gender=="Male"] <- "male"
+df$gender[df$gender=="Female"] <- "female"
+df$gender <- factor(df$gender)
+
+names(df)[4] <- "loyalty"
+df$loyalty[df$loyalty=="Loyal Customer"] <- "loyal"
+df$loyalty[df$loyalty=="disloyal Customer"] <- "disloyal"
+df$loyalty <- factor(df$loyalty)
+
+names(df)[6] <- "travel_type"
+df$travel_type[df$travel_type=="Personal Travel"] <- "personal"
+df$travel_type[df$travel_type=="Business travel"] <- "business"
+df$travel_type <- as.factor(df$travel_type)
+
+names(df)[7] <- "class"
+df$class[df$class=="Business"] <- "business"
+df$class[df$class=="Eco"] <- "eco"
+df$class[df$class=="Eco Plus"] <- "ecoplus"
+df$class <- as.factor(df$class)
+
+names(df)[25] <- "satisfaction"
+df$satisfaction[df$satisfaction=="neutral or dissatisfied"] <- "not_satisfied"
+df$satisfaction <- as.factor(df$satisfaction)
+
+
+rtgcols <- c("rating_wifi", "rating_timely", "rating_onlinebooking", "rating_gate",
+             "rating_catering", "rating_onlineboarding", "rating_seat", "rating_entertain",
+             "rating_onboard", "rating_legroom", "rating_baggage", "rating_checkin",
+             "rating_inflight", "rating_clean")
+function_factor <- function(y) {
+  factor(y, levels=c("1","2","3","4","5"))
+}
+names(df)[9:22] <- rtgcols
+df[rtgcols] <- lapply(df[rtgcols], function_factor)
+
+names(df)[5] <- "age"
+df$age <- as.numeric(df$age)
+
+names(df)[8] <- "distance"
+df$distance <- as.numeric(df$distance)
+
+names(df)[23] <- "delay_depart"
+df$delay_depart <- as.numeric(df$delay_depart)
+
+names(df)[24] <- "delay_arrive"
+df$delay_arrive <- as.numeric(df$delay_arrive)
+
+df <- subset(df, select=-c(n,id))
+```
+\
+There are some observations with no values for arrival delay. Since arrival delay is zero for almost all observations, we can replace these missing values with zeroes. Also, there are some observations with missing values for some service ratings. We remove these observations and end up with 95,704 observations.
+\
+```{r}
+df$delay_arrive <- ifelse(is.na(df$delay_arrive), 0, df$delay_arrive)
+df <- na.omit(df)
+df_k2 <- df[1:5,5:9]
+knitr::kable(df_k2,
+caption = "Cleaned training data")
+```
+\
+We load our testing data, and perform the same operations. We end up with 23,863 observations.
+
+```{r}
+df_test <- read.csv("test_org.csv", header=TRUE, dec=".", encoding="UTF-8" )
+
+names(df_test)[3] <- "gender"
+df_test$gender[df_test$gender=="Male"] <- "male"
+df_test$gender[df_test$gender=="Female"] <- "female"
+df_test$gender <- factor(df_test$gender)
+
+names(df_test)[4] <- "loyalty"
+df_test$loyalty[df_test$loyalty=="Loyal Customer"] <- "loyal"
+df_test$loyalty[df_test$loyalty=="disloyal Customer"] <- "disloyal"
+df_test$loyalty <- factor(df_test$loyalty)
+
+names(df_test)[6] <- "travel_type"
+df_test$travel_type[df_test$travel_type=="Personal Travel"] <- "personal"
+df_test$travel_type[df_test$travel_type=="Business travel"] <- "business"
+df_test$travel_type <- as.factor(df_test$travel_type)
+
+names(df_test)[7] <- "class"
+df_test$class[df_test$class=="Business"] <- "business"
+df_test$class[df_test$class=="Eco"] <- "eco"
+df_test$class[df_test$class=="Eco Plus"] <- "ecoplus"
+df_test$class <- as.factor(df_test$class)
+
+names(df_test)[25] <- "satisfaction"
+df_test$satisfaction[df_test$satisfaction=="neutral or dissatisfied"] <- "not_satisfied"
+df_test$satisfaction <- factor(df_test$satisfaction)
+
+names(df_test)[9:22] <- rtgcols
+df_test[rtgcols] <- lapply(df_test[rtgcols], function_factor)
+
+names(df_test)[5] <- "age"
+df_test$age <- as.numeric(df_test$age)
+
+names(df_test)[8] <- "distance"
+df_test$distance <- as.numeric(df_test$distance)
+
+names(df_test)[23] <- "delay_depart"
+df_test$delay_depart <- as.numeric(df_test$delay_depart)
+
+names(df_test)[24] <- "delay_arrive"
+df_test$delay_arrive <- as.numeric(df_test$delay_arrive)
+
+df_test$delay_arrive <- ifelse(is.na(df_test$delay_arrive), 0, df_test$delay_arrive)
+
+df_test <- na.omit(df_test)
+
+df_test <- subset(df_test, select=-c(n,id))
+
+```
+
+## Exploratory analysis
+
+### Distributions
+
+Let's summarize our dataset, and start with checking the balances of our factor variables.
+\
+```{r}
+summary(df)
+```
+
+```{r}
+for (i in c(1,2,4,5,23)) {
+  df_bar <- as.data.frame(sort(table(df[,i]), decreasing=T))
+  names(df_bar)[1] <- names(df)[i]
+  names(df_bar)[2] <- "Count"
+  x_val <- df_bar[,1]
+  y_val <- df_bar[,2]
+  y_lab <- colnames(df_bar)[2]
+  pcts <- scales::percent(round(df_bar[,2] / sum(df_bar[,2]), 2))
+  
+  p <- ggplot(df_bar, aes(x=!!x_val, y=!!y_val)) + 
+    geom_bar(stat="identity", color="#92C5DE", fill="#92C5DE", size=1, alpha=0.5, width=0.3) + 
+    theme_bw() +
+    labs(x="", y=y_lab) +
+    geom_text(aes(label=!!pcts), vjust=1.2, color="black", size=3)
+  
+  assign(paste0("bar", i), p)
+}
+```
+
+```{r}
+bar23 + labs(title="Balance of the satisfaction variable", subtitle="N=95,704")
+
+bar1 + bar4 + bar2 + bar5 + plot_annotation(title="Balances of factor variables", subtitle="N=95,704",
+                                                    theme=theme_bw())
+```
+\
+Some of our factor variables are balanced, while some are very unbalanced.
+
+- Our outcome variable, satisfaction, is slightly unbalanced. Keep in mind that the value not_satisfied includes customers whose satisfaction is classified as "neutral", as well as those classified as unsatisfied. 
+- Gender is roughly balanced 50-50%. Travel purpose is unbalanced roughly 70-30% towards business travelers. 
+- Customer loyalty is very unbalanced, roughly 85-15% towards customers classified as loyal. 
+- Class is roughly 49% business, 44% eco and 7% eco plus.
+
+Next, let's look at the distributions of our numerical variables with histograms.
+
+```{r}
+df_hist1_stats <- data.frame(
+  v=c(round(min(df$age), 2), round(mean(df$age), 2), 
+      c(round(median(df$age),2)), round(max(df$age), 2)), 
+  y=c(500, 8500, 8000, 700),                                  
+  x=c(11,47,47,85),                                       
+  label=c("Min:", "Mean:", "Median:", "Max:")             
+)
+
+hist1 <- ggplot(df, aes(age)) + 
+  geom_histogram(aes(y=..count..), bins=27, color="#92C5DE", fill="#92C5DE", size=1, alpha=0.5) +
+  geom_vline(xintercept=(mean(df$age)), color="#CA0020", size=1, linetype="dashed") +
+  geom_vline(xintercept=(median(df$age)), color="#5E3C99", size=1, linetype="dashed") +
+  geom_vline(xintercept=(min(df$age)), color="#FDB863", size=1, linetype="dashed") +
+  geom_vline(xintercept=(max(df$age)), color="#FDB863", size=1, linetype="dashed") +
+  geom_density(aes(y =..density..*(103904*3.1)), color="#018571", size=0.75) +
+  labs(x="Age", y="Count", title="Histogram of age", subtitle="N=95,704") + 
+  geom_text(data=df_hist1_stats, 
+            aes(x=x, y=y, label=paste(label, v))) +
+  scale_x_continuous(breaks=seq(0,100,10)) +
+  theme_bw()  
+  
+hist1
+
+```
+\
+Age appears to be reasonably close to normally distributed. Our dataset is representative of all age groups.
+\
+\
+```{r}
+df_hist2_stats <- data.frame(
+  v=c(round(min(df$distance), 2), round(mean(df$distance), 2), 
+      c(round(median(df$distance),2)), round(max(df$distance), 2)), 
+  y=c(1000, 8100, 8100, 1000),                                  
+  x=c(10,1600,600,5000),                                       
+  label=c("Min:", "Mean:\n", "Median:\n", "Max:")             
+)
+
+bw_hist2 <- 2 * IQR(df$distance) / length(df$distance)^(1/3) 
+
+hist2 <- ggplot(df, aes(distance)) + 
+  geom_histogram(aes(y=..count..), bins=bw_hist2, color="#92C5DE", fill="#92C5DE", size=1, alpha=0.5) +
+  geom_density(aes(y =..density..*(103904*102)), color="#018571", size=0.75) +
+  geom_vline(xintercept=(mean(df$distance)), color="#CA0020", size=1, linetype="dashed") +
+  geom_vline(xintercept=(median(df$distance)), color="#5E3C99", size=1, linetype="dashed") +
+  geom_vline(xintercept=(min(df$distance)), color="#FDB863", size=1, linetype="dashed") +
+  geom_vline(xintercept=(max(df$distance)), color="#FDB863", size=1, linetype="dashed") +
+  labs(x="Flight distance", y="Count", title="Histogram of flight distance", subtitle="n=95,704") + 
+  geom_text(data=df_hist2_stats, 
+            aes(x=x, y=y, label=paste(label, v))) +
+  scale_x_continuous(breaks=seq(0,5000,1000)) +
+  theme_bw()
+hist2
+```
+\
+Flight distance is very right skewed. The mean flight distance, influenced by few observations with very high distances, is considerably higher than the median distance. Most flights in our dataset have shorter distances, less than 1,000-1,250.
+\
+\
+```{r}
+df_hist3_stats <- data.frame(
+  v=c(round(min(df$delay_depart), 2), round(mean(df$delay_depart), 2), 
+      c(round(median(df$delay_depart),2)), round(max(df$delay_depart), 2)), 
+  y=c(5000, 20000, 12500, 5000),                                  
+  x=c(10,150,10,1600),                                       
+  label=c("Min:", "Mean:", "Median:", "Max:")             
+)
+
+hist3 <- ggplot(df, aes(delay_depart)) + 
+  geom_histogram(aes(y=..count..), bins=20, color="#92C5DE", fill="#92C5DE", size=1, alpha=0.5) +
+  labs(x="Departure delay in mins", y="Count", title="Histogram of departure delays", subtitle="n=95,704") +
+  geom_text(data=df_hist3_stats, 
+            aes(x=x, y=y, label=paste(label, v))) +
+  scale_x_continuous(breaks=seq(0,1500,250)) +
+  theme_bw()
+hist3
+```
+
+```{r}
+df_hist4_stats <- data.frame(
+  v=c(round(min(df$delay_arrive), 2), round(mean(df$delay_arrive), 2), 
+      c(round(median(df$delay_arrive),2)), round(max(df$delay_arrive), 2)), 
+  y=c(5000, 20000, 12500, 5000),                                  
+  x=c(10,150,10,1600),                                       
+  label=c("Min:", "Mean:", "Median:", "Max:")             
+)
+
+hist4 <- ggplot(df, aes(delay_arrive)) + 
+  geom_histogram(aes(y=..count..), bins=20, color="#92C5DE", fill="#92C5DE", size=1, alpha=0.5) +
+  labs(x="Arrival delay in mins", y="Count", title="Histogram of arrival delays", subtitle="n=95,704") + 
+  geom_text(data=df_hist4_stats, 
+            aes(x=x, y=y, label=paste(label, v))) +
+  scale_x_continuous(breaks=seq(0,1500,250)) +
+  theme_bw()
+hist4
+```
+
+- Departure delay is zero for the vast majority of observations, and the mean, influenced by few high value observations, is still barely 15 minutes.
+- Arrival delays paint a very similar picture to departure delays. Mostly zero values, and a mean of 15.32 minutes influenced by few high value observations.
+
+\
+Let's look at the distributions of our service rating variables, which are ordinal factor variables ranked from 1 to 5. Since there are 14 service categories in our dataset, let's try to visualize all of them in a single stacked barplot instead of looking at them one by one.
+\
+```{r}
+df_rtg <- df[,7:20]
+df_rtg <- apply(df_rtg, 2, table)
+df_rtg <- as.data.frame(df_rtg)
+df_rtg <- df_rtg %>% mutate(df_rtg, rating=1:5)
+df_rtg <- reshape(data=df_rtg, idvar="rating", varying=
+                    c("rating_wifi", "rating_timely", "rating_onlinebooking", "rating_gate",
+             "rating_catering", "rating_onlineboarding", "rating_seat", "rating_entertain",
+             "rating_onboard", "rating_legroom", "rating_baggage", "rating_checkin",
+             "rating_inflight", "rating_clean"),
+                v.name="service", times=c("rating_wifi", "rating_timely", "rating_onlinebooking", "rating_gate",
+             "rating_catering", "rating_onlineboarding", "rating_seat", "rating_entertain",
+             "rating_onboard", "rating_legroom", "rating_baggage", "rating_checkin",
+             "rating_inflight", "rating_clean"), direction="long")
+names(df_rtg)[2] <- "services"
+names(df_rtg)[3] <- "count"
+
+bp1 <- ggplot(df_rtg, aes(fill=services, y=count, x=rating)) + 
+  geom_bar(position="stack", stat="identity", color="black", size=0.75, width=0.75) +
+  labs(x="Rating", y="Count", title="Distribution of service ratings", subtitle="14 categories, n=95,704 observations",) + 
+  theme_bw() 
+
+bp1
+
+
+```
+\
+Ratings across all service categories generally follow a left skewed distribution, with 4 being the most frequent score. However, this pattern doesn't hold for some individual service categories, such as wifi service, online booking and gate location. Let's plot these separately, as the individual patterns for single categories are not very clear in the stacked barplot.
+\
+\
+```{r}
+df_rtg2 <- df[, c("rating_wifi", "rating_onlinebooking", "rating_gate")]
+df_rtg2 <- apply(df_rtg2, 2, table)
+df_rtg2 <- as.data.frame(df_rtg2)
+df_rtg2 <- df_rtg2 %>% mutate(df_rtg2, rating=1:5)
+df_rtg2 <- reshape(data=df_rtg2, idvar="rating", varying=
+                    c("rating_wifi", "rating_onlinebooking", "rating_gate"),
+                v.name="service", times=c("rating_wifi", "rating_onlinebooking", "rating_gate"), direction="long")
+names(df_rtg2)[2] <- "services"
+names(df_rtg2)[3] <- "count"
+
+
+bp2 <- ggplot(df_rtg2, aes(fill=services, y=count, x=rating)) + 
+  geom_bar(position="stack", stat="identity", color="black", size=0.75, width=0.75) +
+  labs(x="Rating", y="Count", title="Distribution of service ratings", 
+       subtitle="3 categories, n=95,704 observations") + 
+  scale_fill_manual(values=c("#CA0020", "#018571", "#92C5DE"), name="Services") +
+  theme_bw() 
+
+bp2
+```
+\
+Ratings for gate location, online booking and wifi service are centered around 2 and 3, making them the lowest rated categories. They may be especially significant factors in predicting passenger (dis)satisfaction.
+
+### Relationships
+
+Let's visualize the relationships between satisfaction and our predictor variables, starting with the numeric variables in our dataset. We will create boxplots for each numeric variable, grouped by satisfaction, and view them together.
+\
+```{r}
+box1 <- ggplot(df) + aes(y=age, x=satisfaction, fill=satisfaction) + 
+  geom_boxplot(width=0.1, lwd=0.75, fatten=1) +
+  stat_boxplot(geom="errorbar", width=0.1, lwd=0.75, fatten=1) +
+  #labs(y="Age", x="Satisfaction", title="Age and satisfaction", subtitle="n=95,704") + 
+  scale_y_continuous(breaks=seq(10,100,10)) +
+  scale_fill_brewer(palette="Set1") +
+  guides(fill="none") +
+  theme_bw() 
+```
+
+
+```{r}
+box2 <- ggplot(df) + aes(y=distance, x=satisfaction, fill=satisfaction) + 
+  geom_boxplot(width=0.1, lwd=0.75, fatten=1) +
+  stat_boxplot(geom="errorbar", width=0.1, lwd=0.75, fatten=1) +
+  #labs(y="Distance", x="Satisfaction", title="Flight distance and satisfaction", subtitle="n=95,704") + 
+  scale_y_continuous(breaks=seq(0,5000,500)) +
+  guides(fill="none") +
+  scale_fill_brewer(palette="Set1") +
+  theme_bw() 
+```
+
+
+```{r}
+box3 <- ggplot(df) + aes(y=delay_depart, x=satisfaction, fill=satisfaction) + 
+  geom_boxplot(width=0.1, lwd=0.75, fatten=1) +
+  stat_boxplot(geom="errorbar", width=0.1, lwd=0.75, fatten=1) +
+  #labs(y="Delay in minutes", x="Satisfaction", title="Departure delay and satisfaction", subtitle="n=95,704") + 
+  scale_y_continuous(breaks=seq(0,1600,200)) +
+  guides(fill="none") +
+  scale_fill_brewer(palette="Set1") +
+  theme_bw() 
+```
+
+
+```{r}
+box4 <- ggplot(df) + aes(y=delay_arrive, x=satisfaction, fill=satisfaction) + 
+  geom_boxplot(width=0.1, lwd=0.75, fatten=1) +
+  stat_boxplot(geom="errorbar", width=0.1, lwd=0.75, fatten=1) +
+  #labs(y="Delay in minutes", x="Satisfaction", title="Arrival delay and satisfaction", subtitle="n=95,704") + 
+  scale_y_continuous(breaks=seq(0,1600,200)) +
+  guides(fill="none") +
+  scale_fill_brewer(palette="Set1") +
+  theme_bw() 
+```
+
+
+```{r}
+(box1 | box2) / (box3 | box4) +
+  plot_annotation(title="Relationships between satisfaction and numerical variables",
+                  subtitle="N=95,704", theme=theme_bw())
+```
+
+- Boxplots of ages, grouped by satisfaction, show that not satisfied passengers generally tend to be younger, though their maximum age is also higher than satisfied passengers.
+  - Satisfied passengers tend to be generally older, and belong to a narrower age range.
+- Satisfied passengers tend to fly considerably longer distance, while not satisfied passengers tend to fly close to 1,000 in distance, though there are numerous outliers.
+  - This trend is likely due to confounding factors: For example, long-distance flights may offer better service.
+- The values for departure delay are dominantly zero, so it's hard to interpret a relationship with satisfaction, even when the plot is printed by itself, in full size. This is not likely to be a strong predictor of satisfaction.
+  - Arrival delay delay displays a very similar plot to departure delay. There may be a causal relationship between the delays: Intuitively, we would expect a delay in departure to cause a delay in arrival.
+
+```{r, include=FALSE}
+for (i in c(1,2,4,5)) {
+
+df_tp <- data.frame(df[,i], df$satisfaction)
+names(df_tp)[1] <- names(df)[i]
+names(df_tp)[2] <- "satisfaction"
+df_tp <- df_tp %>% group_by(df_tp[1], satisfaction) %>% summarise(count=n())
+df_tp <- as.data.frame(df_tp)
+
+aesx <- df_tp[,1]
+labx <-names(df_tp[1])
+aesy <- df_tp[,2]
+aeslbl <- df_tp[,3]
+  
+tp <- ggplot(df_tp, aes(x=!!aesx, y=!!aesy, fill=!!aeslbl)) +
+  geom_tile(color = "white",
+            lwd = 1.5,
+            linetype = "solid") +
+  labs(x=labx, y="Satisfaction") +
+  geom_text(aes(label=!!aeslbl, color=!!aeslbl), vjust=1, size=4, fontface="bold") +
+  scale_fill_distiller(palette="Blues", direction=1) +
+  scale_color_distiller(palette="Reds", direction=-1) +
+  guides(fill = guide_colourbar(barwidth = 0.5, barheight = 10, title="Count")) +
+  guides(color="none") +
+  theme_bw() 
+
+assign(paste0("tp", i), tp)
+}
+```
+
+```{r}
+for (i in c(7:20)) {
+
+df_tp <- data.frame(df[,i], df$satisfaction)
+names(df_tp)[1] <- names(df)[i]
+names(df_tp)[2] <- "satisfaction"
+df_tp <- df_tp %>% group_by(df_tp[1], satisfaction) %>% summarise(count=n())
+df_tp <- as.data.frame(df_tp)
+
+aesx <- df_tp[,1]
+labx <-names(df_tp[1])
+aesy <- df_tp[,2]
+aeslbl <- df_tp[,3]
+  
+tp <- ggplot(df_tp, aes(x=!!aesx, y=!!aesy, fill=!!aeslbl)) +
+  geom_tile(color = "white",
+            lwd = 1.5,
+            linetype = "solid") +
+  labs(x=labx, y="Satisfaction") +
+  geom_text(aes(label=!!aeslbl, color=!!aeslbl), vjust=1, size=4, fontface="bold") +
+  scale_fill_distiller(palette="Blues", direction=1) +
+  scale_color_distiller(palette="Reds", direction=-1) +
+  guides(fill = guide_colourbar(barwidth = 0.5, barheight = 10, title="Count")) +
+  guides(color="none") +
+  theme_bw() 
+
+assign(paste0("tp", i), tp)
+}
+```
+
+Let's explore the relationships between our factor variables, and passenger satisfaction, using tile plots.
+\
+```{r}
+tp1 + labs(title="Gender and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+There is very little difference in passenger satisfaction among genders, but women are a bit more likely to be not satisfied.
+\
+\
+```{r}
+tp2 + labs(title="Loyalty and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Loyal customers are much more likely to be satisfied, compared to disloyal customers.
+\
+\
+```{r}
+tp4 + labs(title="Travel purpose and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Business-purposed travelers are much more likely to be satisfied, compared to personal-purpose travelers. This may be because business-purposed travelers mostly fly business class, and business class service levels are likely to be better.
+\
+\
+```{r}
+tp5 + labs(title="Travel class and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Business class travelers are much more likely to be satisfied compared to eco and eco plus travelers. This is likely the confounding factor behind the relationship of travel_type with satisfaction, which we just examined above.
+\
+\
+```{r}
+tp7 + labs(title="Wifi ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Satisfied passengers are more likely to rate wifi services as 4-5. Unsatisfied passengers are much more likely to rate wifi services as 2-3. The tile plot pattern suggests a non-linear relationship between satisfaction and the wifi rating: Satisfaction declines going from a rating of 1 to ratings of 2-3, then steeply increases with ratings of 4-5.
+\
+\
+```{r}
+tp8 + labs(title="Convenience of arrival / departure times and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Interestingly, a rating of 4-5 for convenient departure and arrival times coincides with more dissatisfaction. This suggests this variable may not be a significant predictor of satisfaction, or may come with a confounding factor that reduces satisfaction.
+\
+\
+```{r}
+tp9 + labs(title="Online booking ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Online booking ratings of 2-3 coincide with much more dissatisfaction compared to a rating of 1. A rating of 4-5 coincides with an increase in satisfaction. Again, the pattern suggests a non-linear relationship between online booking ratings and satisfaction.
+\
+\
+```{r}
+tp10 + labs(title="Gate location ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Gate location ratings of 3-4 coincide with much higher dissatisfaction compared to 1-2, while a rating of 5 coincides with slightly more satisfaction. It may not be a very significant predictor.
+\
+\
+```{r}
+tp11 + labs(title="Food & drink ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+A rating of 1-3 for food and drink coincides with more dissatisfaction. A rating of 4-5 slightly improves satisfaction. This suggests low service levels in catering is highly damaging to satisfaction, but high levels aren’t as beneficial.
+\
+\
+```{r}
+tp12 + labs(title="Online boarding ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Online boarding ratings of 1-3 are very strongly associated with dissatisfaction, and ratings of 4-5 are strongly associated with satisfaction. This is likely a key predictor. The pattern suggests a non-linear relationship.
+\
+\
+```{r}
+tp13 + labs(title="Seat comfort ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Seat comfort ratings of 4-5 are associated with more satisfaction, and ratings of 1-3 are associated with dissatisfaction. The relationship appears to be non-linear.
+\
+\
+```{r}
+tp14 + labs(title="Entertainment ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Entertainment ratings of 1-3 are associated with high dissatisfaction, while ratings of 4-5 are associated with satisfaction. The relationship is likely non-linear. This is likely an important predictor.
+\
+\
+```{r}
+tp15 + labs(title="On-board service ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+On-board service ratings of 1-3 are associated with dissatisfaction. A rating of 4 slightly favors satisfaction, but is close to neutrality. A rating of 5 is highly associated with satisfaction, hinting that passengers expect no less than excellent onboard service.
+\
+\
+```{r}
+tp16 + labs(title="Legroom ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Legroom ratings of 1-3 are strongly associated with dissatisfaction, while ratings of 4-5 are more weakly associated with satisfaction. This may suggest that the lack of legroom has a bigger negative effect compared to the positive effect of adequate legroom.
+\
+\
+```{r}
+tp17 + labs(title="Baggage service ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+For baggage service, ratings of 1-3 are associated with strong dissatisfaction, and even a rating of 4 is weakly associated with dissatisfaction. Only a rating of 5 is associated with satisfaction, suggesting passengers expect no less than excellent baggage service.
+\
+\
+```{r}
+tp18 + labs(title="Check-in service ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+For check-in service, any rating less than 5 is associated with dissatisfaction, most strongly between 1-2, suggesting passengers expect no less than excellent service in check-ins.
+\
+\
+```{r}
+tp19 + labs(title="In-flight service ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+Ratings between 1-4 for in-flight service is associated with dissatisfaction, strongly between 1-3, weakly for a rating of 4. Only a rating of 5 is associated with satisfaction. Passengers expect excellent in-flight service.
+\
+\
+```{r}
+tp20 + labs(title="Cleanliness ratings and satisfaction", subtitle="N=95,704") + theme(plot.margin = unit(c(4,4,4,4), "mm"))
+```
+\
+A cleanliness rating of 1-2 is strongly associated with dissatisfaction. A rating of 3 is less strongly associated with dissatisfaction, while a rating of 4-5 moderately increases satisfaction. This suggests that a lack of cleanliness is especially damaging for satisfaction, while adequate cleanliness gives a smaller boost for satisfaction.
+
+### Correlations
+
+Let's look at the correlations within our predictor variables, and see if multicollinearity is likely to be an issue. Let's start with our numeric variables.
+\
+```{r}
+df_num <- df %>% select_if(is.numeric)
+ggpairs(df_num)
+```
+\
+There is a very high degree of statistically significant correlation between departure delay and arrival delay, with a coefficient of 0.96. We can clearly confirm the correlation visually from the scatterplot. This is expected, as delays in departure are likely to cause delays in arrival. In our modeling, we should consider excluding arrival delays as a predictor, both because this variable had missing observations, and because it is likely affected and caused by departure delays to some degree.
+\
+\
+Since our ordinal factor variables, the service ratings, are all rated from 1-5, we can consider them numeric variables to easily test their correlations. Let's create a correlation plot with the correlations of our rating variables. 
+\
+```{r}
+func_num <- function(y) {
+  as.numeric(y)
+}
+df_rating <- df[rtgcols]
+df_rating <- lapply(df_rating, func_num)
+df_rating <- as.data.frame(df_rating)
+corrplot(cor(df_rating, method="spearman"), method="square", type="upper", order="AOE", addCoef.col = "black", number.cex=0.45, mar=c(0,0,1,0), tl.cex=0.85)
+```
+
+```{r, echo=TRUE, include=TRUE}
+cor(df_rating$rating_onlinebooking, df_rating$rating_wifi, method="spearman")
+```
+\
+In the above plot, a larger blue square indicates higher positive correlation, and a larger red square indicates higher negative correlation. We can see that there are a lot of pairs with a moderate to high degree of correlation. The highest correlations are between online booking-wifi ratings, and entertainment-cleanliness ratings, with a coefficient of 0.68.
+\
+\
+For our nominal factor predictor variables (gender, loyalty, travel_type, class), we can perform chi square tests to see if there are significant associations. The concept of correlation doesn't apply to these variables, as their levels are not naturally ordered, and differences between their levels can't be considered increases or decreases. Instead, these tests should be interpreted as a "degree of association".
+\
+\
+Gender has a small but significant association with customer loyalty: Male customers are slightly more likely to be loyal.
+\
+```{r}
+tchi1 <- table(df$gender, df$loyalty)
+chi1 <- chisq.test(tchi1)
+tchi1
+chi1
+```
+\
+Gender has a very small but significant association with travel class. Men are slightly more likely to travel business class, while women are slightly more likely to travel eco and eco plus.
+\
+```{r}
+tchi2 <- table(df$gender, df$class)
+chi2 <- chisq.test(tchi2)
+tchi2
+chi2
+```
+\
+Loyalty has a very large and significant association with travel type: 23% of business-purposed travelers are disloyal, while only 0.4% of personal.purposed travelers are disloyal.
+\
+```{r}
+tchi3 <- table(df$loyalty, df$travel_type)
+chi3 <- chisq.test(tchi3)
+tchi3
+chi3
+```
+\
+Loyalty has a large and significant association with travel class. 13% of business class travelers are disloyal, 21% of eco class travelers are disloyal, and 9% of ecoplus travelers are disloyal. Keep in mind that travel_type and class are different variables: The former records the purpose of travel, regardless of the ticket's class, and the latter records the ticket's class regardless of the purpose of travel. So a business traveler is not necessarily a business class passenger, as we will see in a moment.
+\
+```{r}
+tchi4 <- table(df$loyalty, df$class)
+chi4 <- chisq.test(tchi4)
+tchi4
+chi4
+```
+\
+Travel type has a very large and significant association with travel class. 96% of business class passengers travel for business purposes. 42% of eco class passengers travel for business purposes. 53% of ecoplus class passengers travel for business purposes. This explains how business-purposed travelers (variable: travel_type) can be more disloyal while eco class passengers (variable: class) are more disloyal than business class passengers.
+\
+```{r}
+tchi5 <- table(df$travel_type, df$class)
+chi5 <- chisq.test(tchi5)
+tchi5
+chi5
+```
+
+## Classification models
+
+### Logistic regression
+
+Logistic regression is probably the best known classification model. Binary logistic regression is used for binary classification problems like ours, where the dependent variable has two outcomes, 0=failure and 1=success.
+\
+\
+Logistic regression makes the following assumptions:
+
+1. A binary outcome variable,
+2. A linear relationship between the predicted log odds (logits), and the predictor variables,
+3. Zero / low multicollinearity between the predictors,
+4. Lack of influential values and outliers.
+
+The first assumption is satisfied for our problem, but the second and third are very likely violated: We saw in our exploratory analysis that some predictors likely have a non-linear relationship with satisfaction, and correlation between numerous predictors is present. We will nevertheless start by fitting a logistic model, and test the assumptions.
+
+#### Variable choice
+
+We will exclude some variables from our model: 
+
+- Arrival delay: We previously showed arrival delay is very strongly correlated with, and possibly caused by departure delay.
+- Travel type: This variable is highly associated with the travel class, and causes it to a high degree. Travel type by itself likely doesn't have a big effect on satisfaction, while the travel class clearly does, so we will use travel class.
+- Distance: We saw that long-distance flights tend to coincide with higher satisfaction, but this is likely because of the presence of a confounder such as better service, and not a direct effect of distance. We will exclude it to avoid biasing the confounder's effect.
+
+#### Model and predictions
+
+Let's fit our logistic model lg1.
+\
+```{r}
+lg1 <- glm(satisfaction ~ . - delay_arrive - travel_type - distance, data=df, family=binomial(link="logit"))
+summary(lg1)
+```
+\
+Most variables are statistically very significant predictors in lg1, however the equation and coefficients are hard to interpret: The rating variables have four coefficients each corresponding to a score of 2-4, while a score of 1 is built into the intercept. The coefficients are log transformed, and do not represent unit increases / decreases.
+\
+\
+Let's test the accuracy of our model by making predictions on our testing dataset. We identify 0.5 as our threshold probability: If the model predicts a probability over 0.5, we classify the passenger as satisfied, and vice versa.
+\
+```{r, echo=TRUE, include=TRUE}
+prob_lg1 <- lg1 %>% predict(df_test, type="response")
+pred_lg1 <- ifelse(prob_lg1 > 0.5, "satisfied", "not_satisfied")
+tb_lg1 <- table(pred_lg1, df_test$satisfaction, dnn=list("prediction", "true class"))
+
+lg1_acc <- mean(pred_lg1 == df_test$satisfaction)
+lg1_acc
+```
+The model lg1 accurately classified 91% of the passengers in our testing dataset. Let's look at the confusion matrix, and some performance metrics for the model.
+\
+```{r, echo=TRUE}
+tb_lg1
+precision(tb_lg1)
+recall(tb_lg1)
+```
+
+- The model precision is 92%: This is the percentage of predictions made as "satisfied", that were correct. 8% of predictions made as "satisfied" were false. 
+  - 7% of unsatisfied passengers were falsely classified as satisfied (false positive rate).
+- The model recall is 93%: This is the percentage of satisfied passengers correctly identified.
+  - 11% of satisfied passengers were falsely classified as unsatisfied (false negative rate)
+- Intuitively, falsely identifying a customer as satisfied (false positive) is likely to be more costly than falsely identifying them as unsatisfied (false negative). To evaluate our models' performance according to our problem, precision and the false positive rate are the more important metrics.
+- The higher false negative rate suggests that model lg1's predictions tend to bias towards dissatisfaction, which is expected, as our training data includes more observations of unsatisfied passengers.
+
+The model appears to perform well in terms of prediction accuracy, precision and the false positive rate. But let's diagnose the assumptions see if the model is appropriate for the data.
+
+#### Diagnostics and assumptions
+
+To assess the linear relationship assumption, we can plot the predicted logits of the model against the predictor variables. Let's do this for a couple of variables that may be highly significant predictors: Online booking, online boarding and wifi ratings.
+\
+```{r}
+lg1_logits <- log(prob_lg1/(1-prob_lg1))
+df_logits <- as.data.frame(lg1_logits)
+df_logits <- df_logits %>% mutate(df_logits, booking=as.numeric(df_test$rating_onlinebooking))
+df_logits <- df_logits %>% mutate(df_logits, boarding=as.numeric(df_test$rating_onlineboarding))
+df_logits <- df_logits %>% mutate(df_logits, wifi=as.numeric(df_test$rating_wifi))
+
+ggplot(df_logits, aes(booking, lg1_logits)) + 
+  geom_point(size=0.5, alpha=0.5) +
+  geom_smooth(method="loess") + 
+  labs(x="Online booking ratings", y="lg1 predicted logits") + 
+  theme_bw() 
+  
+ggplot(df_logits, aes(boarding, lg1_logits)) +
+  geom_point(size=0.5, alpha=0.5) +
+  geom_smooth(method="loess") +
+  labs(x="Online boarding ratings", y="lg1 predicted logits") +
+  theme_bw() 
+  
+ggplot(df_logits, aes(wifi, lg1_logits)) +
+  geom_point(size=0.5, alpha=0.5) +
+  geom_smooth(method="loess") +
+  labs(x="Wifi ratings", y="lg1 predicted logits") +
+  theme_bw() 
+```
+\
+These predictors do not have a linear relationship with the predicted logits of our model lg1. Instead, the relationships appear to be polynomial. This likely applies to numerous other predictor variables, just as we expected from our exploratory analysis. The linearity assumption is violated, and the model's prediction accuracy may suffer with different datasets.
+\
+\
+From our analysis of correlations between predictor variables, we can also expect multicollinearity issues in our model. Let's test this by getting the variance inflation factors of our predictors.
+\
+```{r, echo=TRUE}
+car::vif(lg1)
+```
+\
+In general, a VIF smaller than 5 is considered non-problematic, between 5-10 can indicate moderate multicollinearity issues, and a VIF of 10+ is considered strong multicollinearity. We have numerous variables with a VIF of over 10, the highest one being 79.66 for the entertainment rating variable. Our model is strongly affected by multicollinearity: While the overall predictions are not affected by this, the significance and coefficients of individual variables can be highly erroneous. We can't reliably assess the importance of individual predictors with this model.
+\
+\
+Let's see if influential observations and outliers are a serious issue for our model.
+\
+```{r}
+lg1_df <- augment(lg1) %>% mutate(index = 1:n())
+
+ggplot(lg1_df, aes(index, .std.resid)) +
+  geom_point(aes(color=satisfaction), alpha=0.5) + 
+  scale_y_continuous(breaks=seq(-5,5,1)) +
+  labs(title="Standardized residuals of lg1, grouped by satisfaction", subtitle="N=23,863", y="standardized residuals") +
+  scale_color_manual(values=c("#CA0020", "#92C5DE")) +
+  theme_bw() 
+```
+
+```{r, echo=TRUE}
+lg1_df %>% filter(abs(.std.resid)>3)
+```
+\
+We have 243 observations with a standardized residual greater than an absolute value of 3. 
+
+- Looking at the plot of standardized residuals, we see less observations classified as not_satisfied with a standard residual between 2-3, compared to the observations classified as satisfied. 
+- However, slightly more observations classified as not satisfied have a standardized residual greater than 3. 
+- From this plot, it's hard to come to a clear conclusion about which class is predicted with more error, but we already know from the confusion matrix that our false negative rate is higher than the false positive rate, which indicates our model makes more errors for satisfied passengers.
+
+Overall, even though our model made good predictions on testing data, the assumptions for a logistic model were violated. 
+
+- For violations of linearity, we could attempt non-linear transformations, but with this many variables it would be time consuming, and not guaranteed to result in major improvements. 
+- For multicollinearity, we would have to drop some variables, but we don't clearly know which ones are more or less significant. 
+- For outliers, we don't have a good reason to exclude them: Our model needs to account for all passengers to be able to make predictions outside this dataset. Removing observations until the model looks "better" could just lead to a lack of robustness. Instead, we should fit a more appropriate model for our data.
+
+### Decision trees
+
+A decision tree takes each predictor variable as a decision node, which tests and splits the data based on a condition of the predictor variable. This process is repeated until "pure" nodes that can't be split further are achieved. A decision tree model is likely to be appropriate for our data, because:
+
+- Decision trees perform well with many factor predictors,
+- Are robust against multicollinearity or outliers,
+- Do not make any linearity assumptions between the predictors and the outcome variable.
+
+#### Model and predictions
+
+Let's fit a decision tree model for our training data. We won't exclude any variables, as the algorithm will choose the predictors.
+\
+```{r, echo=TRUE}
+dt1 <- rpart(satisfaction ~ . , data=df, method="class", parms=list(split="gini"))
+
+rpart.plot(dt1, type=2, extra=106, box.palette="RdGn")
+```
+\
+Decision trees are easy to plot and interpret visually, especially with few variables and splits as in ours. Some insights from our decision tree plot:
+\
+\
+Left branch:
+
+- 88% of passengers that rate online boarding as 1-3 are unsatisfied. 12% are satisfied. These passengers makes up 49% of our dataset.
+  - Out of these, passengers that also rate wifi service as 1-3 are 93% unsatisfied, 7% satisfied. These passengers make up 45% of our dataset.
+  - Passengers that rate online boarding as 1-3, but wifi service as 4-5 are 65% satisfied, 35% unsatisfied. These passengers make up 5% of our dataset.
+
+Right branch:
+
+- 72% of passengers that rate online boarding as 4-5 are satisfied. 28% are unsatisfied. These passengers make up 51% of our dataset.
+  - Out of these, passengers that also travel for personal purposes are 22% satisfied, 78% unsatisfied. These passengers make up 10% of our dataset.
+    - Out of these, passengers that also rate wifi service less than 5 are 88% unsatisfied, 12% satisfied. These passengers make up 9% of our dataset.
+    - Passengers that also rate wifi service as 5 are all satisfied. These passengers make up 1% of our dataset.
+  - Passengers that rate online boarding as 4-5, but are traveling for business reasons are 85% satisfied, 15% unsatisfied. These passengers make up 40% of our dataset.
+  
+Compared to the logistic model, the decision tree is much more intuitive and easy to interpret, and confirms some of our expectations from the exploratory analysis: Online boarding and wifi services are critical variables in predicting satisfaction.
+\
+\
+Let's see how our model predicts the testing data:
+\
+```{r, echo=TRUE}
+pred_dt1 <- predict(dt1, df_test, type="class")
+tb_dt1 <- table(pred_dt1, df_test$satisfaction, dnn=list("prediction", "true class"))
+
+dt1_acc <- sum(diag(tb_dt1)) / sum(tb_dt1)
+dt1_acc
+```
+Our model predicts the data with 88% accuracy, 3% less than the logistic model. 
+\
+Let's see the confusion matrix and performance metrics.
+```{r, echo=TRUE}
+tb_dt1
+precision(tb_dt1)
+recall(tb_dt1)
+```
+
+- Precision is 92%. 92% of "satisfied" predictions are made correctly.
+  - The model falsely predicts 14% of the unsatisfied passengers as satisfied. 
+- Recall is 86%. 86% of satisfied passengers are correctly identified by the model.
+  - The model falsely predicts 10% of the satisfied passengers as unsatisfied. 
+- The decision tree model dt1 has practically the same precision compared to our logistic model lg1. The false positive rate is 7% higher. This suggests that lg1's predictions are better for identifying unsatisfied customers.
+- Contrary to the logistic model, dt1's predictions tend to bias towards satisfaction, which is unexpected as we have more training data of unsatisfied passengers.
+
+Let's see the complexity parameters for dt1: The complexity parameter (CP) is the minimum percentage reduction in error needed to justify another split. By default, the CP is specified as 0.01. 
+\
+```{r}
+printcp(dt1)
+```
+Our model reached a CP of 0.01 after the fourth split, and stopped splitting. A lower CP value leads to more splits, more variables, potentially less error, but also more complexity, potential overfitting and loss of robustness. A higher CP value leads to less splits, less variables, potentially more error, but also less complexity, potentially less overfitting and increased model robustness.
+\
+\
+Decision trees generally tend to overfit: With a lot of splits and a lot of variables, we can explain more of the variance in our data, but an overfit complex tree may not predict other datasets well, as well as being harder to interpret and visualize. To counteract this, pruning is usually carried out on decision trees, by adjusting the CP value and lowering the number of splits/variables. But in our case, we already have a model with few splits and variables, so pruning is unlikely to lead to an improvement. Instead, let's see if we can improve our prediction accuracy with a lower CP, without adding a lot of complexity.
+
+#### Tuning the decision tree
+
+Let's try fitting the dt2 model with a CP of 0.005.
+\
+```{r, echo=TRUE}
+dt2 <- rpart(satisfaction ~ . , data=df, method="class", parms=list(split="gini"),
+             cp=0.005)
+
+rpart.plot(dt2, type=2, extra=106, box.palette="RdGn")
+```
+\
+The model dt2 is much more complex. The decision tree plot is no longer easily interpretable like dt1's tree. Let's see if the improvement in predictions is worth this.
+\
+```{r, echo=TRUE}
+pred_dt2 <- predict(dt2, df_test, type="class")
+tb_dt2 <- table(pred_dt2, df_test$satisfaction, dnn=list("predictions", "true class"))
+
+dt2_acc <- sum(diag(tb_dt2)) / sum(tb_dt2)
+dt2_acc
+```
+dt2 is roughly 93% accurate in predicting our testing data, which is a 5% improvement over dt1, and almost 2% over the logistic model. It's a subjective assessment, but dt1 could be preferred for simplicity and interpretability. Of course, if the goal is purely making predictions, even lower CP values may yield even more accurate predictions, though with the increasing risk of overfitting and losing generalizability.
+\
+\
+Let's view the confusion matrix and performance metrics.
+```{r, echo=TRUE}
+tb_dt2
+precision(tb_dt2)
+recall(tb_dt2)
+```
+
+- Precision is 93%. 93% of "satisfied" predictions are made correctly.
+  - The model falsely predicts 6% of the unsatisfied passengers as satisfied. 
+- Recall is 94%. 94% of satisfied passengers are correctly identified by the model.
+  - The model falsely predicts 9% of the satisfied passengers as unsatisfied. \
+- dt2's predictions perform better than dt1, and a bit better than the logistic model lg1. 
+- dt2, like lg1, and unlike dt1, is more biased towards classifying passengers as unsatisfied, which is expected as we have more training data of unsatisfied passengers.
+
+### Random forest
+
+A random forest, in essence, is the process of fitting numerous decision trees and aggregating their results. Random forests generally tend to make more accurate predictions compared to single decision trees, while avoiding the overfitting pitfall. The process can be summarized as follows:
+
+- A random subset is taken from the training data,
+- A random number of M predictors are chosen from the predictor variables to fit a decision tree,
+- This process is repeated for an N number of times, creating an N number of decision trees,
+- The predictions from all trees are combined with voting or parallel averaging.
+
+Let's fit a random forest. We start with the default number of 500 trees. We have 22 predictors, and we start with the square root of this as the number of predictors for each tree.
+
+```{r, echo=TRUE}
+set.seed(1)
+m <- sqrt(22)
+rf1 <- randomForest(satisfaction ~ . , data=df, ntree=500, mtry=m)
+print(rf1)
+```
+\
+With 500 trees and 5 variables for each tree, rf1 returns an OOB estimate of 3.67%. 
+
+- OOB stands for out-of-bag error, which is the average error made by all trees, when predicting the sample of data left out from their training. 
+- This is similar to the practice of splitting our dataset into training and testing datasets. We can expect a 96.4% accuracy rate in predictions on the testing dataset.
+
+Let's test rf1's predictions on the testing data.
+\
+```{r}
+pred_rf1 <- predict(rf1, df_test)
+tb_rf1 <- table(pred_rf1, df_test$satisfaction, dnn=list("predictions", "true class"))
+
+rf1_acc <- sum(diag(tb_rf1)) / sum(tb_rf1)
+rf1_acc
+```
+As expected based on the OOB rate, the model is 96.3% accurate in predicting the testing data, a considerable improvement over both the logistic model and the single decision tree models.
+\
+\
+Let's see the confusion matrix and performance metrics.
+```{r, echo=TRUE}
+tb_rf1
+precision(tb_rf1)
+recall(tb_rf1)
+```
+
+- Precision is 96%. 96% of "satisfied" predictions are made correctly.
+  - The model falsely predicts 2% of the unsatisfied passengers as satisfied. 
+- Recall is 98%. 98% of satisfied passengers are correctly identified by the model.
+  - The model falsely predicts 6% of the satisfied passengers as unsatisfied. 
+- rf1 performs considerably better than all previous models, on all metrics. We established precision and the false positive rate as the most important metrics, as above all, we want to avoid falsely identifying unsatisfied passengers as satisfied. rf1 has the highest precision and the lowest false positive rate among our models so far.
+- rf1's predictions are biased towards dissatisfaction, which is better than the opposite case for our objective, and expected due to having more observations of unsatisfied passengers in our training data.
+
+After fitting a random forest model, we can also calculate and plot the importance of each predictor variable, based on each variable's average effect in reducing variance.
+\
+```{r}
+varImpPlot(rf1, main="Variable importance plot of rf1")
+```
+\
+Confirming our expectations from the exploratory analysis, and the dt1 decision tree model, the ratings for online boarding and wifi service, the travel purpose, and the travel class are the most important predictors, followed closely by the entertainment rating.
+
+#### Tuning the random forest
+
+We can experiment fitting random forests with different numbers of trees and predictors, to try and achieve slightly more accurate predictions. 
+\
+```{r}
+set.seed(1)
+rf2 <- randomForest(satisfaction ~ ., data=df, ntree=500, mtry=8)
+print(rf2)
+```
+After some iteration, increasing the number of variables per tree to 8 yields a slightly lower OOB of 3.58%. Increasing the number of trees to 1000 had a very negligible effect, and decreasing either parameter caused an increase in the OOB. Let's see the effect this has on our predictions, and the variable importance.
+\
+```{r}
+pred_rf2 <- predict(rf2, df_test)
+tb_rf2 <- table(pred_rf2, df_test$satisfaction, dnn=list("predictions", "true class"))
+
+rf2_acc <- sum(diag(tb_rf2)) / sum(tb_rf2)
+rf2_acc
+```
+The prediction accuracy on the testing data is 96.4%, practically the same as rf1.
+\
+\
+Let's see the confusion matrix and peformance metrics.
+```{r, echo=TRUE}
+tb_rf2
+precision(tb_rf2)
+recall(tb_rf2)
+```
+
+- Precision is 96%. 96% of "satisfied" predictions are made correctly.
+  - The model falsely predicts 2% of the unsatisfied passengers as satisfied. 
+- Recall is 98%. 98% of satisfied passengers are correctly identified by the model.
+  - The model falsely predicts 6% of the satisfied passengers as unsatisfied.
+- Overall, rf2's predictions perform practically the same as rf1.
+
+\
+```{r}
+varImpPlot(rf2, main="Variable importance plot, rf2")
+```
+\
+We have some changes in the variable importance plot, for example, loyalty rose from 8th place to 6th place in importance. Also, the importance of the top predictor, online boarding rating, is even higher now compared to the other predictors.
+
+## Conclusion
+
+We have attempted to fit an appropriate classification model to our airlines passenger satisfaction dataset, in order to predict the satisfaction/dissatisfaction of passengers, as well as determine the important predictors of satisfaction.
+
+```{r}
+df_perf <- data.frame(Model=c("lg1: Logistic", "dt1: Simple decision tree", "dt2: Complex decision tree", "rf2: Random forest"),
+  Accuracy=c(lg1_acc, dt1_acc, dt2_acc, rf2_acc),
+                      Precision=c(precision(tb_lg1), precision(tb_dt1), precision(tb_dt2), precision(tb_rf2)),
+                      Recall=c(recall(tb_lg1), recall(tb_dt1), recall(tb_dt2), recall(tb_rf2)),
+                      FPR=c(0.07, 0.14, 0.06, 0.02),
+                      FNR=c(0.11, 0.10, 0.09, 0.06))
+
+for (i in 2:6) {
+  df_perf[,i] <- round(df_perf[,i], 2) * 100
+}
+
+```
+
+```{r}
+brewpal <- brewer.pal(n=4, name="RdYlGn")
+
+for (i in 2:4){
+minval <- min(df_perf[i])
+maxval <- max(df_perf[i])
+pal <- col_numeric(brewpal, domain=c(minval, maxval), alpha=0.75)
+
+assign(paste0("pal", i), pal)
+}
+
+for (i in 5:6){
+minval <- min(df_perf[i])
+maxval <- max(df_perf[i])
+pal <- col_numeric(brewpal, domain=c(minval, maxval), alpha=0.75, reverse=TRUE)
+
+assign(paste0("pal", i), pal)
+}
+
+tb_perf <- gt(data=df_perf, rowname_col=1) %>% 
+  tab_header(title="Model performances, in %") %>% 
+  opt_table_font(font=list(google_font("Calibri"), default_fonts())) %>% #google fonts
+  tab_stubhead(label = "Models") %>% #stubhead=rownames header
+  data_color(columns=2, colors=pal2) %>%
+  data_color(columns=3, colors=pal3) %>%
+  data_color(columns=4, colors=pal4) %>%
+  data_color(columns=5, colors=pal5) %>%
+  data_color(columns=6, colors=pal6) %>%
+  cols_align(align = "center", columns = everything()) %>%
+  tab_style(locations=cells_column_labels(columns=everything()), 
+            style=list(
+              cell_borders(sides="bottom", weight=px(3)), #bottom border
+              cell_text(weight="bold"))) #bold text
+
+as_raw_html(tb_perf)
+```
+\
+The logistic model lg1 yielded a good prediction performance, but the model assumptions were not met. 
+
+- Lack of linearity between predictors and predicted logits, high multicollinearity, and high influence observations make the logistic model less dependable for predictions outside the current datasets. 
+- The coefficients and significances of individual variables could be misleading.
+
+The decision tree model dt1 yielded a prediction performance considerably lower compared to the logistic model. 
+
+- However, dt1 offers a very simple decision tree, easy to plot and interpret with only three variables: Ratings for online boarding and wifi service, and travel type.
+- dt2 improved the prediction performance, but made the decision tree much more complex and hard to interpret.
+
+The random forest model rf2's predictions perform considerably better than the previous models, on all evaluated metrics. 
+
+- rf2 identified online boarding ratings as the most important predictor, with almost twice the effect compared to the second closest variable, wifi ratings. 
+- Other important predictors that closely follow are travel purpose, travel class and entertainment ratings. This confirms a lot of our expectations from the exploratory analysis of relationships.
+
+Some nominal factor variables in our dataset were unbalanced, such as travel purpose, which was biased towards business travelers. 
+
+- Since these are variables that can't be "improved" like the service ratings, it would make sense to subset the data based on these categories, and perform the analysis using only the ratings as predictors. 
+- While this would likely reduce the variance explained by the models, it would also provide more insight into which service categories should be improved to best increase satisfaction, for different categories of clients. 
+- For example, knowing business-purpose travelers are much more likely to be satisfied provides us with some insight, but doesn't tell us what exactly to improve.
