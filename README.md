@@ -1,4 +1,4 @@
-# AirlineClassification
+# Classification - Airline satisfaction analysis
 Classification modeling on a large dataset of airline passenger satisfaction, using logistic regression, decision trees and random forests.
 
 [Report](https://github.com/AhmetZamanis/AirlineClassification/blob/main/ClassificationAirline2.md) of the full analysis
